@@ -1,0 +1,343 @@
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
+import os, base64, time, hashlib
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.backends import default_backend
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("dark-blue")
+
+# ======================================================
+#                  CRYPTO ENGINE
+# ======================================================
+
+class CryptoEngine:
+    def __init__(self):
+        self.backend = default_backend()
+        self.private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048
+        )
+        self.public_key = self.private_key.public_key()
+
+    def derive_key(self, password, salt):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=200000,
+            backend=self.backend
+        )
+        return kdf.derive(password.encode())
+
+    def aes_encrypt(self, data, password):
+        salt = os.urandom(16)
+        iv = os.urandom(16)
+        key = self.derive_key(password, salt)
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=self.backend)
+        encryptor = cipher.encryptor()
+
+        pad = 16 - len(data) % 16
+        data += bytes([pad])*pad
+
+        ct = encryptor.update(data) + encryptor.finalize()
+        return base64.b64encode(salt + iv + ct)
+
+    def aes_decrypt(self, data, password):
+        raw = base64.b64decode(data)
+        salt, iv, ct = raw[:16], raw[16:32], raw[32:]
+        key = self.derive_key(password, salt)
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=self.backend)
+        decryptor = cipher.decryptor()
+        pt = decryptor.update(ct) + decryptor.finalize()
+
+        return pt[:-pt[-1]]
+
+    def rsa_encrypt(self, msg):
+        return base64.b64encode(self.public_key.encrypt(
+            msg,
+            padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None)
+        ))
+
+    def rsa_decrypt(self, data):
+        return self.private_key.decrypt(
+            base64.b64decode(data),
+            padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None)
+        )
+
+    def sha256(self, msg):
+        return hashlib.sha256(msg.encode()).hexdigest()
+
+    def sha512(self, msg):
+        return hashlib.sha512(msg.encode()).hexdigest()
+
+    def sign(self, msg):
+        sig = self.private_key.sign(
+            msg,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256()
+        )
+        return base64.b64encode(sig)
+
+    def verify(self, msg, sig):
+        try:
+            self.public_key.verify(
+                base64.b64decode(sig), msg,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH),
+                hashes.SHA256())
+            return True
+        except:
+            return False
+
+crypto = CryptoEngine()
+
+# ======================================================
+#                    GUI APP
+# ======================================================
+
+app = ctk.CTk()
+app.title("CryptoGuard Pro – Academic Edition")
+app.geometry("1200x750")
+
+sidebar = ctk.CTkFrame(app, width=200)
+sidebar.pack(side="left", fill="y")
+
+main = ctk.CTkFrame(app)
+main.pack(side="right", fill="both", expand=True)
+
+title = ctk.CTkLabel(sidebar, text="CryptoGuard Pro", font=("Segoe UI", 20, "bold"))
+title.pack(pady=20)
+
+buttons = {}
+pages = {}
+
+def show_page(name):
+    for p in pages.values():
+        p.pack_forget()
+    pages[name].pack(fill="both", expand=True)
+
+def add_nav(name):
+    b = ctk.CTkButton(sidebar, text=name, command=lambda: show_page(name))
+    b.pack(fill="x", padx=10, pady=5)
+    buttons[name] = b
+
+# Navigation
+for p in ["AES", "RSA", "Hash", "Signature", "Chat", "File Vault", "Logs"]:
+    add_nav(p)
+
+# Pages
+for p in buttons:
+    frame = ctk.CTkFrame(main)
+    pages[p] = frame
+
+logbox = []
+
+def add_log(text):
+    logbox.append(time.strftime("[%H:%M:%S] ") + text)
+    if "Logs" in pages:
+        log_text.delete("1.0","end")
+        log_text.insert("end","\n".join(logbox[-100:]))
+
+# ================= AES PAGE =================
+
+aes_page = pages["AES"]
+ctk.CTkLabel(aes_page, text="AES-256 Encryption", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+aes_input = ctk.CTkTextbox(aes_page, height=120)
+aes_input.pack(padx=20, pady=10, fill="x")
+
+aes_pass = ctk.CTkEntry(aes_page, show="*")
+aes_pass.pack(pady=5)
+
+aes_output = ctk.CTkTextbox(aes_page, height=120)
+aes_output.pack(padx=20, pady=10, fill="x")
+
+def aes_enc():
+    try:
+        start=time.time()
+        data=aes_input.get("1.0","end").encode()
+        enc=crypto.aes_encrypt(data,aes_pass.get())
+        aes_output.delete("1.0","end")
+        aes_output.insert("end",enc.decode())
+        add_log("AES encrypted in "+str(round(time.time()-start,3))+"s")
+    except:
+        messagebox.showerror("Error","AES Encryption failed")
+
+def aes_dec():
+    try:
+        data=aes_output.get("1.0","end")
+        dec=crypto.aes_decrypt(data,aes_pass.get())
+        aes_input.delete("1.0","end")
+        aes_input.insert("end",dec.decode())
+        add_log("AES decrypted")
+    except:
+        messagebox.showerror("Error","Wrong password or corrupted data")
+
+ctk.CTkButton(aes_page,text="Encrypt",command=aes_enc).pack(pady=5)
+ctk.CTkButton(aes_page,text="Decrypt",command=aes_dec).pack()
+
+# Show AES by default
+show_page("AES")
+# ================= RSA PAGE =================
+
+rsa_page = pages["RSA"]
+ctk.CTkLabel(rsa_page, text="RSA Public Key Encryption", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+rsa_input = ctk.CTkTextbox(rsa_page, height=120)
+rsa_input.pack(padx=20,pady=10,fill="x")
+
+rsa_output = ctk.CTkTextbox(rsa_page, height=120)
+rsa_output.pack(padx=20,pady=10,fill="x")
+
+def rsa_enc():
+    try:
+        data = rsa_input.get("1.0","end").encode()
+        enc = crypto.rsa_encrypt(data)
+        rsa_output.delete("1.0","end")
+        rsa_output.insert("end", enc.decode())
+        add_log("RSA encrypted")
+    except:
+        messagebox.showerror("Error","RSA Encryption failed")
+
+def rsa_dec():
+    try:
+        data = rsa_output.get("1.0","end")
+        dec = crypto.rsa_decrypt(data)
+        rsa_input.delete("1.0","end")
+        rsa_input.insert("end", dec.decode())
+        add_log("RSA decrypted")
+    except:
+        messagebox.showerror("Error","RSA Decryption failed")
+
+ctk.CTkButton(rsa_page,text="Encrypt",command=rsa_enc).pack(pady=5)
+ctk.CTkButton(rsa_page,text="Decrypt",command=rsa_dec).pack()
+
+# ================= HASH PAGE =================
+
+hash_page = pages["Hash"]
+ctk.CTkLabel(hash_page, text="Secure Hashing", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+hash_entry = ctk.CTkEntry(hash_page, width=600)
+hash_entry.pack(pady=10)
+
+hash_output = ctk.CTkTextbox(hash_page, height=120)
+hash_output.pack(padx=20,pady=10,fill="x")
+
+def do_sha256():
+    hash_output.delete("1.0","end")
+    hash_output.insert("end", crypto.sha256(hash_entry.get()))
+    add_log("SHA-256 generated")
+
+def do_sha512():
+    hash_output.delete("1.0","end")
+    hash_output.insert("end", crypto.sha512(hash_entry.get()))
+    add_log("SHA-512 generated")
+
+ctk.CTkButton(hash_page,text="SHA-256",command=do_sha256).pack(pady=5)
+ctk.CTkButton(hash_page,text="SHA-512",command=do_sha512).pack()
+
+# ================= DIGITAL SIGNATURE =================
+
+sign_page = pages["Signature"]
+ctk.CTkLabel(sign_page, text="Digital Signature", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+sign_input = ctk.CTkTextbox(sign_page, height=120)
+sign_input.pack(padx=20,pady=10,fill="x")
+
+sign_output = ctk.CTkTextbox(sign_page, height=100)
+sign_output.pack(padx=20,pady=10,fill="x")
+
+def sign_msg():
+    sig = crypto.sign(sign_input.get("1.0","end").encode())
+    sign_output.delete("1.0","end")
+    sign_output.insert("end", sig.decode())
+    add_log("Message signed")
+
+def verify_msg():
+    valid = crypto.verify(sign_input.get("1.0","end").encode(), sign_output.get("1.0","end"))
+    messagebox.showinfo("Verification","Valid Signature" if valid else "Invalid Signature")
+    add_log("Signature verified")
+
+ctk.CTkButton(sign_page,text="Sign",command=sign_msg).pack(pady=5)
+ctk.CTkButton(sign_page,text="Verify",command=verify_msg).pack()
+
+# ================= ENCRYPTED CHAT =================
+
+chat_page = pages["Chat"]
+ctk.CTkLabel(chat_page, text="Encrypted Chat", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+chat_display = ctk.CTkTextbox(chat_page, height=200)
+chat_display.pack(padx=20,pady=10,fill="x")
+
+chat_input = ctk.CTkEntry(chat_page, width=600)
+chat_input.pack(pady=5)
+
+def send_chat():
+    msg = chat_input.get()
+    enc = crypto.aes_encrypt(msg.encode(), "chatkey")
+    dec = crypto.aes_decrypt(enc, "chatkey").decode()
+    chat_display.insert("end", "You: "+dec+"\n")
+    chat_input.delete(0,"end")
+    add_log("Chat message encrypted & sent")
+
+ctk.CTkButton(chat_page,text="Send Secure Message",command=send_chat).pack(pady=5)
+
+# ================= FILE VAULT =================
+
+file_page = pages["File Vault"]
+ctk.CTkLabel(file_page, text="Secure File Vault (AES)", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+def encrypt_file():
+    file = filedialog.askopenfilename()
+    if not file: return
+    pwd = aes_pass.get()
+    data = open(file,"rb").read()
+    enc = crypto.aes_encrypt(data, pwd)
+    open(file+".enc","wb").write(enc)
+    messagebox.showinfo("Done","File Encrypted")
+    add_log("File encrypted")
+
+def decrypt_file():
+    file = filedialog.askopenfilename()
+    if not file: return
+    pwd = aes_pass.get()
+    data = open(file,"rb").read()
+    dec = crypto.aes_decrypt(data, pwd)
+    open(file.replace(".enc",""),"wb").write(dec)
+    messagebox.showinfo("Done","File Decrypted")
+    add_log("File decrypted")
+
+ctk.CTkButton(file_page,text="Encrypt File",command=encrypt_file).pack(pady=10)
+ctk.CTkButton(file_page,text="Decrypt File",command=decrypt_file).pack(pady=10)
+# ================= LOGS PAGE =================
+
+log_page = pages["Logs"]
+ctk.CTkLabel(log_page, text="System Logs & History", font=("Segoe UI",18,"bold")).pack(pady=10)
+
+log_text = ctk.CTkTextbox(log_page)
+log_text.pack(padx=20,pady=10,fill="both",expand=True)
+
+add_log("CryptoGuard Pro Started")
+add_log("AES-256, RSA-2048, SHA, Digital Signature Loaded")
+
+# ================= STATUS BAR =================
+
+status = ctk.CTkLabel(app, text="Ready | Secure System Active", anchor="w")
+status.pack(side="bottom", fill="x")
+
+# ================= RUN =================
+
+app.mainloop()
